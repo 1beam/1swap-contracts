@@ -56,6 +56,7 @@ contract StableSwapRouter {
         uint256 deadline
     ) external returns (uint256) {
         IERC20 token = IERC20(pool.getLpToken());
+        IERC20 base_lp = IERC20(basePool.getLpToken());
         require(base_amounts.length == basePool.getNumberOfTokens(), "invalidBaseAmountsLength");
         require(meta_amounts.length == pool.getNumberOfTokens(), "invalidMetaAmountsLength");
         bool deposit_base = false;
@@ -64,26 +65,39 @@ contract StableSwapRouter {
             if (amount > 0) {
                 deposit_base = true;
                 IERC20 coin = basePool.getToken(i);
-                coin.safeTransferFrom(msg.sender, address(this), amount);
-                uint256 transferred = coin.balanceOf(address(this));
+                uint256 transferred = transferIn(coin, msg.sender, amount);
                 coin.safeIncreaseAllowance(address(basePool), transferred);
                 base_amounts[i] = transferred;
             }
         }
+
+        uint256 base_lp_received;
         if (deposit_base) {
-            basePool.addLiquidity(base_amounts, 0, deadline);
+            base_lp_received = basePool.addLiquidity(base_amounts, 0, deadline);
         }
 
         for (uint8 i = 0; i < meta_amounts.length; i++) {
             IERC20 coin = pool.getToken(i);
-            if (meta_amounts[i] > 0) {
-                coin.safeTransferFrom(msg.sender, address(this), meta_amounts[i]);
+
+            uint256 transferred;
+            if (address(coin) == address(base_lp)) {
+                transferred = base_lp_received;
+            } else if (meta_amounts[i] > 0) {
+                transferred = transferIn(coin, msg.sender, meta_amounts[i]);
             }
-            uint256 transferred = coin.balanceOf(address(this));
-            coin.safeIncreaseAllowance(address(pool), transferred);
+
             meta_amounts[i] = transferred;
+            if (transferred > 0) {
+                coin.safeIncreaseAllowance(address(pool), transferred);
+            }
         }
+
+        uint256 base_lp_prior = base_lp.balanceOf(address(this));
         pool.addLiquidity(meta_amounts, minToMint, deadline);
+        if (deposit_base) {
+            require((base_lp.balanceOf(address(this)) + base_lp_received) == base_lp_prior, "invalidBasePool");
+        }
+
         uint256 lpAmount = token.balanceOf(address(this));
         token.transfer(msg.sender, lpAmount);
         return lpAmount;
@@ -291,5 +305,15 @@ contract StableSwapRouter {
             tokenLPAmount = pool.calculateSwap(tokenIndexFrom, baseTokenIndex, dx);
         }
         return basePool.calculateRemoveLiquidityOneToken(tokenLPAmount, tokenIndexTo);
+    }
+
+    function transferIn(
+        IERC20 token,
+        address from,
+        uint256 amount
+    ) internal returns (uint256 transferred) {
+        uint256 prior_balance = token.balanceOf(address(this));
+        token.safeTransferFrom(from, address(this), amount);
+        transferred = token.balanceOf(address(this)) - prior_balance;
     }
 }
